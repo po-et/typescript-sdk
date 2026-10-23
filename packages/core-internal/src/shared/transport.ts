@@ -92,7 +92,11 @@ export function fetchWithinOrigin(baseFetch: FetchLike): FetchLike {
             const keepsUserinfo =
                 !(target.username || target.password) || (target.username === from.username && target.password === from.password);
             if (!keepsMethod || !keepsUserinfo || !isWithinOrigin(from, target)) return response;
-            await response.text?.().catch(() => {});
+            try {
+                void response.body?.cancel().catch(() => {});
+            } catch {
+                // A custom fetch may expose a body that cannot be canceled.
+            }
             current = target;
         }
     };

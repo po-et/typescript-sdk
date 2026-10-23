@@ -53,6 +53,83 @@ describe('fetchWithinOrigin', () => {
         expect(baseFetch.mock.calls[1]![1]).toEqual({ ...init, redirect: 'manual' });
     });
 
+    test('follows a redirect even when its response body has errored', async () => {
+        const body = new ReadableStream({
+            start(controller) {
+                controller.error(new Error('redirect body failed'));
+            }
+        });
+        const baseFetch = fetchAnswering({
+            'https://example.com/mcp': () => new Response(body, { status: 307, headers: { location: '/mcp/' } })
+        });
+
+        const response = await fetchWithinOrigin(baseFetch)('https://example.com/mcp', init);
+
+        await expect(response.text()).resolves.toBe('ok');
+        expect(requested(baseFetch)).toEqual(['https://example.com/mcp', 'https://example.com/mcp/']);
+    });
+
+    test('does not wait for a cloned redirect response body to be released', async () => {
+        const response = new Response('redirect body', { status: 307, headers: { location: '/mcp/' } });
+        const retainedForLogging = response.clone();
+        const baseFetch = fetchAnswering({ 'https://example.com/mcp': () => response });
+        const followed = fetchWithinOrigin(baseFetch)('https://example.com/mcp', init);
+
+        try {
+            await new Promise<void>(resolve => setImmediate(resolve));
+            expect(requested(baseFetch)).toEqual(['https://example.com/mcp', 'https://example.com/mcp/']);
+            await expect(followed).resolves.toHaveProperty('status', 200);
+            expect(retainedForLogging.bodyUsed).toBe(false);
+        } finally {
+            await retainedForLogging.body?.cancel();
+            await followed;
+        }
+    });
+
+    test('follows a redirect when canceling its body throws synchronously', async () => {
+        const response = new Response('redirect body', { status: 307, headers: { location: '/mcp/' } });
+        vi.spyOn(response.body!, 'cancel').mockImplementation(() => {
+            throw new TypeError('body cannot be canceled');
+        });
+        const baseFetch = fetchAnswering({ 'https://example.com/mcp': () => response });
+
+        const followed = await fetchWithinOrigin(baseFetch)('https://example.com/mcp', init);
+
+        expect(followed.status).toBe(200);
+        expect(requested(baseFetch)).toEqual(['https://example.com/mcp', 'https://example.com/mcp/']);
+    });
+
+    test('follows a redirect when its response body is locked', async () => {
+        const response = new Response('redirect body', { status: 307, headers: { location: '/mcp/' } });
+        const reader = response.body!.getReader();
+        const baseFetch = fetchAnswering({ 'https://example.com/mcp': () => response });
+
+        try {
+            const followed = await fetchWithinOrigin(baseFetch)('https://example.com/mcp', init);
+
+            expect(followed.status).toBe(200);
+            expect(requested(baseFetch)).toEqual(['https://example.com/mcp', 'https://example.com/mcp/']);
+        } finally {
+            reader.releaseLock();
+        }
+    });
+
+    test.each([
+        { status: 200, location: '/mcp/', redirectMode: undefined },
+        { status: 307, location: 'https://other.example/mcp', redirectMode: undefined },
+        { status: 307, location: '/mcp/', redirectMode: 'manual' as const }
+    ])('leaves the body readable when returning a response as is: %o', async ({ status, location, redirectMode }) => {
+        const response = new Response('available to caller', { status, headers: { location } });
+        const baseFetch = vi.fn<FetchLike>(async () => response);
+
+        const returned = await fetchWithinOrigin(baseFetch)('https://example.com/mcp', { ...init, redirect: redirectMode });
+
+        expect(returned).toBe(response);
+        expect(returned.bodyUsed).toBe(false);
+        await expect(returned.text()).resolves.toBe('available to caller');
+        expect(baseFetch).toHaveBeenCalledTimes(1);
+    });
+
     test.each([301, 302, 303, 307, 308])('follows a %i of a GET within the origin', async status => {
         const baseFetch = fetchAnswering({ 'https://example.com/mcp': () => redirect('https://example.com/mcp/', status) });
 

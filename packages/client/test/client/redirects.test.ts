@@ -335,6 +335,26 @@ describe('redirects', () => {
     });
 
     describe('within the origin', () => {
+        test.each([307, 308])('a %i is followed before its response body ends', async status => {
+            const client = await streamableHttp();
+            let redirectResponse: ServerResponse | undefined;
+            handle = (req, res) => {
+                if (req.url === '/mcp') {
+                    redirectResponse = res;
+                    res.writeHead(status, { location: '/mcp/' });
+                    res.write('redirect body still streaming');
+                    return;
+                }
+                expect(redirectResponse?.writableEnded).toBe(false);
+                res.writeHead(202).end();
+            };
+
+            await client.send(notification);
+
+            expect(endpointRequests.map(r => `${r.method} ${r.url}`)).toEqual(['POST /mcp', 'POST /mcp/']);
+            expect(endpointRequests[1]!.body).toBe(JSON.stringify(notification));
+        });
+
         test.each([307, 308])('a %i of a POST is followed with its headers and body', async status => {
             const client = await streamableHttp();
             handle = (req, res, recorded) =>
